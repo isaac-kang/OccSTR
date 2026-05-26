@@ -48,10 +48,10 @@ logs/
 runs/
 checkpoints/
 
-# Data
+# Data (anchored to repo root so nested data/ or datasets/ modules aren't masked)
 *.lmdb
-data/
-datasets/
+/data/
+/datasets/
 
 # OS
 Thumbs.db
