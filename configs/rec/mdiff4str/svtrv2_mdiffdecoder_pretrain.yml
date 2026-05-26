@@ -1,0 +1,25 @@
+_BASE_:
+  # Architecture is selected via ARCH env var (default: base). Export ARCH=small
+  # to swap to ./svtrv2_mdiffdecoder_small.yml without editing this file.
+  - ./svtrv2_mdiffdecoder_${ARCH:-base}.yml
+
+# MDiff4STR pretrain — Stage-1 PRE-TRAIN on data-u with PL/SF (override epoch_num / output_dir / lr below).
+
+Global:
+  epoch_num: 40
+  # output_dir: auto-composed from --data + model_key by run_*.sh
+  total_bs : 512
+  # total_bs : 768
+  # total_bs : 1024
+  # torch.compile disabled — nrtr_decoder.MultiheadAttention conditionally
+  # registers self.qkv vs self.q/self.kv based on self_attn flag, and mdiff
+  # uses both forms; dynamo guard polls self.qkv on the cross-attn instance
+  # and crashes with AttributeError. Re-enable only after that is fixed.
+  use_compile: False
+  # compile_mode: default | reduce-overhead | max-autotune
+  # compile_dynamic: False  (specialize per shape — 4 unique W ∈ {32,64,96,128})
+
+Optimizer:
+  lr: 2.5e-4 # bs=512에 대해 bs=1024 대비 1/2로 lr 감소
+  # lr: 3.75e-4
+  # lr: 5.0e-4 # for 8gpus bs128/gpu=1024

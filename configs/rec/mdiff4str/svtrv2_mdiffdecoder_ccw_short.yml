@@ -1,0 +1,15 @@
+_BASE_:
+  # Architecture flows through ./svtrv2_mdiffdecoder_short.yml's ARCH selection.
+  - ./svtrv2_mdiffdecoder_short.yml
+
+# CCW variant of short scratch run.
+
+# Global.output_dir auto-composed from --data + model_key by run_*.sh
+
+Train:
+  dataset:
+    name: RotateRatioDataSetTVResize
+
+Eval:
+  dataset:
+    name: RotateRatioDataSetTVResize

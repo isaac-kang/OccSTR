@@ -1,0 +1,15 @@
+_BASE_:
+  # Architecture flows through ./svtrv2_mdiffdecoder_pretrain.yml's ARCH selection.
+  - ./svtrv2_mdiffdecoder_pretrain.yml
+
+# CCW variant of pretrain — Stage-1 with UnionST tall-rotation.
+
+# Global.output_dir auto-composed from --data + model_key by run_*.sh
+
+Train:
+  dataset:
+    name: RotateRatioDataSetTVResize
+
+Eval:
+  dataset:
+    name: RotateRatioDataSetTVResize

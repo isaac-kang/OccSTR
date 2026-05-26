@@ -1,0 +1,18 @@
+_BASE_:
+  # Architecture flows through ./svtrv2_mdiffdecoder_finetune_short.yml's ARCH selection.
+  - ./svtrv2_mdiffdecoder_finetune_short.yml
+
+# CCW variant of short finetune.
+# Inherited pretrained_model points at the non-CCW pretrained checkpoint.
+# For a fully-CCW pipeline, override pretrained_model with a checkpoint
+# produced by svtrv2_mdiffdecoder_ccw_pretrain.yml.
+
+# Global.output_dir auto-composed from --data + model_key by run_*.sh
+
+Train:
+  dataset:
+    name: RotateRatioDataSetTVResize
+
+Eval:
+  dataset:
+    name: RotateRatioDataSetTVResize

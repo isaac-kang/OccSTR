@@ -1,0 +1,23 @@
+_BASE_:
+  # Architecture is selected via ARCH env var (default: base). Export ARCH=small
+  # to swap to ./svtrv2_mdiffdecoder_small.yml without editing this file.
+  - ./svtrv2_mdiffdecoder_${ARCH:-base}.yml
+
+# MDiff4STR + CCW tall-image rotation (UnionST convention).
+# Train + Eval both use RotateRatioDataSetTVResize (rotate_tall direction
+# defaults to 'ccw' — see tools/data/ratio_dataset_tvresize.py).
+#
+# model_key is inherited from the arch yml (base → mdiff, small → mdiff-s).
+# _model_config.sh appends the `_ccw` suffix when CCW=1 so the final segment
+# becomes mdiff_ccw or mdiff-s_ccw — no override needed here.
+
+# Global.output_dir auto-composed from --data + model_key by run_*.sh
+# (no Global override here so device/epoch_num/... pass through from arch yml).
+
+Train:
+  dataset:
+    name: RotateRatioDataSetTVResize
+
+Eval:
+  dataset:
+    name: RotateRatioDataSetTVResize

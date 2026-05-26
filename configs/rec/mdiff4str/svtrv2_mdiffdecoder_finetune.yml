@@ -1,0 +1,33 @@
+_BASE_:
+  # Architecture is selected via ARCH env var (default: base). Export ARCH=small
+  # to swap to ./svtrv2_mdiffdecoder_small.yml without editing this file.
+  - ./svtrv2_mdiffdecoder_${ARCH:-base}.yml
+
+# MDiff4STR fine-tune from pretrained weights on original data.
+
+Global:
+  epoch_num: 20
+  # output_dir: auto-composed from --data + model_key by run_*.sh
+  save_epoch_step: [99999, 1]  # disabled: epoch_N.pth not saved (latest.pth + best.pth만 사용)
+  eval_batch_step: [0, 500]
+  eval_epoch_step: [0, 1]
+  pretrained_model: weights/pretrained/mdiff4str_base/best.pth
+  checkpoints:
+  # total_bs 설정 시 world_size로 나눠 per-card bs 자동 산출.
+  # 비워두면 아래 first_bs 값 그대로 per-card bs로 사용.
+  total_bs : 512
+  # total_bs : 768
+  # total_bs : 1024
+
+Optimizer:
+  lr: 2.5e-5
+  # lr: 3.75e-5
+  # lr: 5.0e-5
+
+LRScheduler:
+  # warmup_epoch: 1
+  warmup_epoch: 1.5
+
+Train:
+  loader:
+    num_workers: 8

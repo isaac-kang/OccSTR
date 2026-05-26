@@ -1,0 +1,22 @@
+_BASE_:
+  # Architecture is selected via ARCH env var (default: base). Export ARCH=small
+  # to swap to ./svtrv2_mdiffdecoder_small.yml without editing this file.
+  - ./svtrv2_mdiffdecoder_${ARCH:-base}.yml
+
+# MDiff4STR scratch — short schedule (override epoch_num / output_dir / lr below).
+
+Global:
+  epoch_num: 4
+  # output_dir: auto-composed from --data + model_key by run_*.sh
+  total_bs : 512
+  # total_bs : 768
+  # total_bs : 1024
+
+Optimizer:
+  lr: 2.5e-5
+  # lr: 3.75e-5
+  # lr: 5.0e-5
+
+LRScheduler:
+  # warmup_epoch: 1
+  warmup_epoch: 1.5
