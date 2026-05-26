@@ -3,7 +3,7 @@ from pathlib import Path
 from PIL import Image
 
 DATA_ROOT   = Path('/data/isaackang/data/STR/openocr')
-OCC_ROOT    = DATA_ROOT / 'occ_aug'
+OCC_ROOT    = Path('/data/isaackang/data/STR/Occ_aug')
 CROP_H, CROP_W = 32, 128
 
 DATASETS = [

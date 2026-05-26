@@ -47,7 +47,7 @@ OCCSTR_ROOT = _HERE.parent
 CRAFT_ROOT  = OCCSTR_ROOT / 'third_party' / 'craft'
 CRAFT_CKPT  = OCCSTR_ROOT / 'weights' / 'pretrained' / 'craft' / 'craft_ic15_20k.pth'
 DATA_ROOT   = Path('/data/isaackang/data/STR/openocr')
-OUTPUT_ROOT = DATA_ROOT / 'occ_aug'
+OUTPUT_ROOT = Path('/data/isaackang/data/STR/Occ_aug')
 
 # ---------------------------------------------------------------------------
 # Processing constants
