@@ -55,3 +55,6 @@ datasets/
 
 # OS
 Thumbs.db
+
+# Claude Code project config
+.claude/
