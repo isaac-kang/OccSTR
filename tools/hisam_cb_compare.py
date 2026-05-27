@@ -279,7 +279,8 @@ def draw_stroke_on_crop(crop, bg_color, mode, rng,
     strokes_data = []
     for i in range(n_strokes):
         use_td = bool(rng.integers(0, 2)) and (h / w < 2)  # force LR for thin chars (h/w≥2)
-        radius = max(1, int(rng.uniform(lo, hi) * h))
+        ref = min(h, w) if use_td else h
+        radius = max(1, int(rng.uniform(lo, hi) * ref))
         if not use_td:
             perp = max(1, int(h * 0.2))
             y0, y3 = lr_y[i]
@@ -344,13 +345,14 @@ def render_stroke_sim(overlay_crops, bg_colors, aabbs, orig_rgb,
 
 def render_multi_sim(overlay_crops, bg_colors, aabbs, orig_rgb,
                      rng, n=10, cell_h=48, cols=5, gap=2,
-                     weak_ratio=(0.07, 0.13), heavy_ratio=(0.18, 0.28)):
-    """n samples with 50/50 weak/heavy, laid out in a cols×rows grid."""
+                     weak_ratio=(0.07, 0.13), heavy_ratio=(0.18, 0.28),
+                     force_mode=None):
+    """n samples laid out in a cols×rows grid. force_mode='weak'/'heavy' or 50/50."""
     h0, w0 = orig_rgb.shape[:2]
     cell_w = max(1, int(w0 * cell_h / h0))
     samples = []
     for _ in range(n):
-        mode = 'weak' if rng.random() < 0.5 else 'heavy'
+        mode = force_mode if force_mode else ('weak' if rng.random() < 0.5 else 'heavy')
         s_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
         _, stroked = render_stroke_sim(overlay_crops, bg_colors, aabbs, orig_rgb,
                                        mode, s_rng, weak_ratio=weak_ratio,
@@ -446,7 +448,7 @@ tr:nth-child(even) td { background: #fbfbfb; }
   __FILTER_BTNS__
 </div>
 <table>
-<thead><tr><th>#</th><th>dataset</th><th>idx</th><th>gt</th><th>original</th><th>Hi-SAM</th><th>CRAFT</th><th>AABB boxes</th><th>char crops (CRAFT AABB)</th><th>weak sim</th><th>heavy sim</th><th>mixed sim ×10</th><th>mixed sim proxy ×10</th></tr></thead>
+<thead><tr><th>#</th><th>dataset</th><th>idx</th><th>gt</th><th>original</th><th>Hi-SAM</th><th>CRAFT</th><th>AABB boxes</th><th>char crops (CRAFT AABB)</th><th>weak sim</th><th>heavy sim</th><th>mixed sim ×10</th><th>mixed sim proxy ×10</th><th>weak ×4</th><th>heavy ×4</th></tr></thead>
 <tbody>
 """
 
@@ -558,6 +560,14 @@ def build_html(rows, seed, out_path, weak_ratio=(0.07, 0.13), heavy_ratio=(0.18,
         multi_proxy_b64 = to_b64_png(render_multi_sim(
             oc, bg_proxy, tf, r['orig'], np.random.default_rng(i + 300000),
             weak_ratio=weak_ratio, heavy_ratio=heavy_ratio))
+        weak4_b64 = to_b64_png(render_multi_sim(
+            oc, bg_proxy, tf, r['orig'], np.random.default_rng(i + 400000),
+            n=4, cols=2, weak_ratio=weak_ratio, heavy_ratio=heavy_ratio,
+            force_mode='weak'))
+        heavy4_b64 = to_b64_png(render_multi_sim(
+            oc, bg_proxy, tf, r['orig'], np.random.default_rng(i + 500000),
+            n=4, cols=2, weak_ratio=weak_ratio, heavy_ratio=heavy_ratio,
+            force_mode='heavy'))
         html += (
             f'<tr data-ds="{r["ds"]}">'
             f'<td class="id">{i}</td>'
@@ -577,6 +587,8 @@ def build_html(rows, seed, out_path, weak_ratio=(0.07, 0.13), heavy_ratio=(0.18,
             f'<img src="data:image/png;base64,{heavy_orig_b64}"></td>'
             f'<td class="img"><img src="data:image/png;base64,{multi_b64}"></td>'
             f'<td class="img"><img src="data:image/png;base64,{multi_proxy_b64}"></td>'
+            f'<td class="img"><img src="data:image/png;base64,{weak4_b64}"></td>'
+            f'<td class="img"><img src="data:image/png;base64,{heavy4_b64}"></td>'
             f'</tr>\n'
         )
     html += HTML_TAIL
