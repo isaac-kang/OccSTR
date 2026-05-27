@@ -299,52 +299,46 @@ def draw_stroke_on_crop(crop, bg_color, mode, rng,
     return out, strokes_data
 
 
-def apply_stroke_to_orig(orig_rgb, bg_color, strokes_data, aabb, target_h=32):
-    """Draw strokes on orig_rgb by scaling crop coords back to original AABB coords."""
-    x1, y1, x2, y2 = aabb
-    w_b, h_b = x2 - x1 + 1, y2 - y1 + 1
-    new_w    = max(1, int(w_b * target_h / h_b))
-    scale_x  = w_b / new_w
-    scale_y  = h_b / target_h
-    out = orig_rgb.copy()
-    color = tuple(int(c) for c in bg_color)
-    h_o, w_o = orig_rgb.shape[:2]
-    for bx, by, radii in strokes_data:
-        r_scale = scale_y
-        for px, py, r in zip(bx, by, radii):
-            ox = int(np.clip(px * scale_x + x1, 0, w_o - 1))
-            oy = int(np.clip(py * scale_y + y1, 0, h_o - 1))
-            r_o = max(1, int(r * r_scale + 0.5))
-            cv2.circle(out, (ox, oy), r_o, color, -1)
-    return out
-
-
 def render_stroke_sim(overlay_crops, bg_colors, aabbs, orig_rgb,
                       mode, rng, target_h=32, gap=3,
                       weak_ratio=(0.07, 0.13), heavy_ratio=(0.18, 0.28)):
-    """Returns (strip_img, orig_stroked_img).
-    strip: single-row char crops with one random crop having a stroke.
-    orig_stroked: full original image with the same stroke in original coords.
-    """
+    """Draw stroke directly on orig_rgb; crop the result for strip display."""
     blank_strip = np.full((target_h, 60, 3), 220, dtype=np.uint8)
-    if not overlay_crops:
-        # No CRAFT boxes: weak stroke on full image using mean image color
+    if not aabbs:
         mean_color = orig_rgb.mean(axis=(0, 1)).astype(np.uint8)
         stroked, _ = draw_stroke_on_crop(orig_rgb, mean_color, 'weak', rng,
                                          weak_ratio, heavy_ratio)
         return blank_strip, stroked
-    idx = int(rng.integers(0, len(overlay_crops)))
+
+    idx = int(rng.integers(0, len(aabbs)))
+    x1, y1, x2, y2 = aabbs[idx]
+
+    # Use crop geometry to generate stroke params, then draw on full image
+    orig_crop = orig_rgb[y1:y2 + 1, x1:x2 + 1]
+    _, strokes_data = draw_stroke_on_crop(orig_crop, bg_colors[idx], mode, rng,
+                                          weak_ratio, heavy_ratio)
+    orig_stroked = orig_rgb.copy()
+    color = tuple(int(c) for c in bg_colors[idx])
+    h_o, w_o = orig_rgb.shape[:2]
+    for bx, by, radii in strokes_data:
+        for px, py, r in zip(bx, by, radii):
+            ox = int(np.clip(px + x1, 0, w_o - 1))
+            oy = int(np.clip(py + y1, 0, h_o - 1))
+            cv2.circle(orig_stroked, (ox, oy), r, color, -1)
+
+    # Strip: crop from stroked image and resize; other crops unchanged
     crops = [c.copy() for c in overlay_crops]
-    crops[idx], strokes_data = draw_stroke_on_crop(
-        crops[idx], bg_colors[idx], mode, rng, weak_ratio, heavy_ratio)
+    h_b, w_b = orig_crop.shape[:2]
+    new_w = max(1, int(w_b * target_h / h_b))
+    stroked_crop = orig_stroked[y1:y2 + 1, x1:x2 + 1]
+    crops[idx] = cv2.resize(stroked_crop, (new_w, target_h), interpolation=cv2.INTER_LINEAR)
     total_w = sum(c.shape[1] for c in crops) + gap * (len(crops) - 1)
     strip = np.full((target_h, total_w, 3), 240, dtype=np.uint8)
     x = 0
     for c in crops:
         strip[:, x:x + c.shape[1]] = c
         x += c.shape[1] + gap
-    orig_stroked = apply_stroke_to_orig(
-        orig_rgb, bg_colors[idx], strokes_data, aabbs[idx], target_h)
+
     return strip, orig_stroked
 
 
