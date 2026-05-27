@@ -195,6 +195,19 @@ def get_char_data(hisam_overlay, image_rgb, mask, score_text,
     return crops, bg_colors, aabbs
 
 
+def get_proxy_bg_colors(image_rgb, score_text, aabbs, bg_thresh=0.3):
+    """Per-box BG using CRAFT score proxy (score < bg_thresh = background)."""
+    fallback = np.array([128, 128, 128], dtype=np.uint8)
+    colors = []
+    for (x1, y1, x2, y2) in aabbs:
+        crop_orig  = image_rgb[y1:y2 + 1, x1:x2 + 1]
+        crop_score = score_text[y1:y2 + 1, x1:x2 + 1]
+        bg_pixels  = crop_orig[crop_score < bg_thresh]
+        colors.append(bg_pixels.mean(axis=0).astype(np.uint8)
+                      if bg_pixels.size > 0 else fallback)
+    return colors
+
+
 def render_crops_strip(overlay_crops, bg_colors, target_h=32, gap=3, row_gap=2):
     """Two-row strip: top=Hi-SAM overlay crops, bottom=BG color solid boxes."""
     total_h = target_h * 2 + row_gap
@@ -439,7 +452,7 @@ tr:nth-child(even) td { background: #fbfbfb; }
   __FILTER_BTNS__
 </div>
 <table>
-<thead><tr><th>#</th><th>dataset</th><th>idx</th><th>gt</th><th>original</th><th>Hi-SAM</th><th>CRAFT</th><th>AABB boxes</th><th>char crops (CRAFT AABB)</th><th>weak sim</th><th>heavy sim</th><th>mixed sim ×10</th></tr></thead>
+<thead><tr><th>#</th><th>dataset</th><th>idx</th><th>gt</th><th>original</th><th>Hi-SAM</th><th>CRAFT</th><th>AABB boxes</th><th>char crops (CRAFT AABB)</th><th>weak sim</th><th>heavy sim</th><th>mixed sim ×10</th><th>mixed sim proxy ×10</th></tr></thead>
 <tbody>
 """
 
@@ -547,6 +560,10 @@ def build_html(rows, seed, out_path, weak_ratio=(0.07, 0.13), heavy_ratio=(0.18,
         multi_b64 = to_b64_png(render_multi_sim(
             oc, bg, tf, r['orig'], np.random.default_rng(i + 200000),
             weak_ratio=weak_ratio, heavy_ratio=heavy_ratio))
+        bg_proxy    = get_proxy_bg_colors(r['orig'], r['craft_heat'], tf)
+        multi_proxy_b64 = to_b64_png(render_multi_sim(
+            oc, bg_proxy, tf, r['orig'], np.random.default_rng(i + 300000),
+            weak_ratio=weak_ratio, heavy_ratio=heavy_ratio))
         html += (
             f'<tr data-ds="{r["ds"]}">'
             f'<td class="id">{i}</td>'
@@ -565,6 +582,7 @@ def build_html(rows, seed, out_path, weak_ratio=(0.07, 0.13), heavy_ratio=(0.18,
             f'<div style="height:6px"></div>'
             f'<img src="data:image/png;base64,{heavy_orig_b64}"></td>'
             f'<td class="img"><img src="data:image/png;base64,{multi_b64}"></td>'
+            f'<td class="img"><img src="data:image/png;base64,{multi_proxy_b64}"></td>'
             f'</tr>\n'
         )
     html += HTML_TAIL
