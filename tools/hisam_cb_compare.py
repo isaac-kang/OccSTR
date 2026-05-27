@@ -265,7 +265,7 @@ def draw_stroke_on_crop(crop, bg_color, mode, rng,
 
     strokes_data = []
     for i in range(n_strokes):
-        use_td = bool(rng.integers(0, 2)) and (h / w < 3)  # force LR for thin chars (h/w≥3)
+        use_td = bool(rng.integers(0, 2)) and (h / w < 2.5)  # force LR for thin chars (h/w≥2.5)
         radius = max(1, int(rng.uniform(lo, hi) * h))
         if not use_td:
             perp = max(1, int(h * 0.2))
