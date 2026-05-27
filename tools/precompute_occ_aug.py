@@ -71,6 +71,14 @@ TEXT_THRESH     = 0.7
 LOW_TEXT        = 0.4
 BG_SCORE_THRESH = 0.3
 MIN_BOX_AREA    = 4
+THIN_CHAR_RATIO = 2.0   # boxes with h/w >= this are forced to LR stroke direction
+
+
+def sample_stroke_direction(box_h: float, box_w: float, rng) -> str:
+    """Return 'lr' or 'td'. Identical rule to hisam_cb_compare.draw_stroke_on_crop."""
+    if box_w < 1e-5 or box_h / box_w >= THIN_CHAR_RATIO:
+        return 'lr'
+    return 'td' if rng.integers(0, 2) else 'lr'
 
 MAP_SIZE       = 8 * (1 << 30)
 CHECKPOINT_KEY = b'__checkpoint__'
