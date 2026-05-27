@@ -157,36 +157,42 @@ def run_craft(net, image_rgb, device, canvas_size=2560, mag_ratio=1.5):
 
 
 def get_char_data(hisam_overlay, image_rgb, mask, score_text,
-                  target_h=32, text_threshold=0.7, link_threshold=0.4, low_text=0.4):
-    """Return (overlay_crops, bg_colors, transforms) — one entry per CRAFT char box.
-    transforms[i] = (M, w_b, h_b, new_w) needed to invert crop→original coords.
+                  target_h=32, text_threshold=0.7, low_text=0.4):
+    """Return (crops, bg_colors, aabbs) — one entry per CRAFT char box (AABB).
+    aabbs[i] = (x1, y1, x2, y2) in original image coordinates.
     """
-    from craft_utils import getDetBoxes_core
-    boxes, _, _ = getDetBoxes_core(score_text, np.zeros_like(score_text),
-                                   text_threshold, link_threshold, low_text)
+    h_img, w_img = image_rgb.shape[:2]
+    bin_map = (score_text > low_text).astype(np.uint8)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bin_map, connectivity=4)
+    boxes = []
+    for k in range(1, n_labels):
+        if stats[k, cv2.CC_STAT_AREA] < 10:
+            continue
+        if score_text[labels == k].max() < text_threshold:
+            continue
+        x  = stats[k, cv2.CC_STAT_LEFT]
+        y  = stats[k, cv2.CC_STAT_TOP]
+        bw = stats[k, cv2.CC_STAT_WIDTH]
+        bh = stats[k, cv2.CC_STAT_HEIGHT]
+        x1 = max(0, x - 1);       y1 = max(0, y - 1)
+        x2 = min(w_img - 1, x + bw); y2 = min(h_img - 1, y + bh)
+        boxes.append((x1, y1, x2, y2))
     if not boxes:
         return [], [], []
-    boxes = sorted(boxes, key=lambda b: b[:, 0].mean())
-    overlay_crops, bg_colors, transforms = [], [], []
-    for box in boxes:
-        box = box.astype(np.float32)
-        w_b = max(1, int(np.linalg.norm(box[0] - box[1]) + 0.5))
-        h_b = max(1, int(np.linalg.norm(box[1] - box[2]) + 0.5))
-        dst = np.array([[0, 0], [w_b, 0], [w_b, h_b], [0, h_b]], dtype=np.float32)
-        M = cv2.getPerspectiveTransform(box, dst)
-        crop_overlay = cv2.warpPerspective(hisam_overlay, M, (w_b, h_b))
-        crop_orig    = cv2.warpPerspective(image_rgb,     M, (w_b, h_b))
-        crop_mask    = cv2.warpPerspective(mask.astype(np.float32), M, (w_b, h_b))
+    boxes.sort(key=lambda b: (b[0] + b[2]) / 2)
+    crops, bg_colors, aabbs = [], [], []
+    for (x1, y1, x2, y2) in boxes:
+        crop_orig = image_rgb[y1:y2 + 1, x1:x2 + 1]
+        crop_mask = mask[y1:y2 + 1, x1:x2 + 1]
         bg_pixels = crop_orig[crop_mask < 0.5]
         bg_color  = bg_pixels.mean(axis=0).astype(np.uint8) if bg_pixels.size > 0 \
                     else np.array([128, 128, 128], dtype=np.uint8)
-        scale = target_h / h_b
-        new_w = max(1, int(w_b * scale))
-        overlay_crops.append(cv2.resize(crop_overlay, (new_w, target_h),
-                                        interpolation=cv2.INTER_LINEAR))
+        w_b, h_b  = x2 - x1 + 1, y2 - y1 + 1
+        new_w     = max(1, int(w_b * target_h / h_b))
+        crops.append(cv2.resize(crop_orig, (new_w, target_h), interpolation=cv2.INTER_LINEAR))
         bg_colors.append(bg_color)
-        transforms.append((M, w_b, h_b, new_w))
-    return overlay_crops, bg_colors, transforms
+        aabbs.append((x1, y1, x2, y2))
+    return crops, bg_colors, aabbs
 
 
 def render_crops_strip(overlay_crops, bg_colors, target_h=32, gap=3, row_gap=2):
@@ -207,86 +213,112 @@ def render_crops_strip(overlay_crops, bg_colors, target_h=32, gap=3, row_gap=2):
     return canvas
 
 
-def _bezier_pts(x0, y0, x3, y3, w, h, perp, rng, n=80):
-    x1 = w // 3      + int(rng.integers(-perp, perp))
+def _bezier_pts_lr(y0, y3, w, h, perp, rng, n=80):
+    """LR stroke: x spans 0→w-1, y wobbles from y0 to y3."""
+    x1 = w // 3     + int(rng.integers(-perp, perp))
     y1 = y0 + (y3 - y0) // 3 + int(rng.integers(-perp, perp))
-    x2 = 2 * w // 3  + int(rng.integers(-perp, perp))
+    x2 = 2 * w // 3 + int(rng.integers(-perp, perp))
     y2 = y0 + 2 * (y3 - y0) // 3 + int(rng.integers(-perp, perp))
     t  = np.linspace(0, 1, n)
-    bx = (1-t)**3*x0 + 3*(1-t)**2*t*x1 + 3*(1-t)*t**2*x2 + t**3*x3
+    bx = (1-t)**3*0  + 3*(1-t)**2*t*x1 + 3*(1-t)*t**2*x2 + t**3*(w - 1)
     by = (1-t)**3*y0 + 3*(1-t)**2*t*y1 + 3*(1-t)*t**2*y2 + t**3*y3
+    return bx, by
+
+
+def _bezier_pts_td(x0, x3, w, h, perp, rng, n=80):
+    """TD stroke: y spans 0→h-1, x wobbles from x0 to x3."""
+    y1 = h // 3     + int(rng.integers(-perp, perp))
+    x1 = x0 + (x3 - x0) // 3 + int(rng.integers(-perp, perp))
+    y2 = 2 * h // 3 + int(rng.integers(-perp, perp))
+    x2 = x0 + 2 * (x3 - x0) // 3 + int(rng.integers(-perp, perp))
+    t  = np.linspace(0, 1, n)
+    bx = (1-t)**3*x0 + 3*(1-t)**2*t*x1 + 3*(1-t)*t**2*x2 + t**3*x3
+    by = (1-t)**3*0  + 3*(1-t)**2*t*y1 + 3*(1-t)*t**2*y2 + t**3*(h - 1)
     return bx, by
 
 
 def draw_stroke_on_crop(crop, bg_color, mode, rng,
                         weak_ratio=(0.07, 0.13), heavy_ratio=(0.18, 0.28)):
     """Draw bezier stroke(s) on crop. Returns (stroked_img, strokes_data).
-    strokes_data = list of (bx, by, radii) in crop (resized) coordinates.
-    Radius is sampled from [lo, hi] * crop_height so coverage scales with size.
+    Randomly chooses LR (left→right) or TD (top→down) direction 50/50.
+    strokes_data = list of (bx, by, radii) in crop coordinates.
     """
     out = crop.copy()
     h, w = out.shape[:2]
     color = tuple(int(c) for c in bg_color)
-    perp = max(1, int(h * 0.2))
-
-    lo, hi = weak_ratio  # both modes use same thickness range
+    lo, hi = weak_ratio
     jitter_s = 0.4
-
-    # For heavy: force X crossing — stroke1 goes top→bottom, stroke2 bottom→top
-    if mode == 'heavy':
-        y_starts = [
-            int(rng.integers(h // 5, h // 2)),      # top half
-            int(rng.integers(h // 2, 4 * h // 5)),  # bottom half
-        ]
-        y_ends = [
-            int(rng.integers(h // 2, 4 * h // 5)),  # bottom half
-            int(rng.integers(h // 5, h // 2)),       # top half
-        ]
-    else:
-        y_starts = [int(rng.integers(h // 5, 4 * h // 5))]
-        y_ends   = [int(rng.integers(h // 5, 4 * h // 5))]
+    use_td = bool(rng.integers(0, 2))   # 50% LR, 50% TD
 
     strokes_data = []
-    for y0, y3 in zip(y_starts, y_ends):
-        radius = max(1, int(rng.uniform(lo, hi) * h))
-        bx, by = _bezier_pts(0, y0, w - 1, y3, w, h, perp, rng)
-        bx += rng.normal(0, jitter_s, bx.shape)
-        by += rng.normal(0, jitter_s, by.shape)
-        radii = []
-        for px, py in zip(bx, by):
-            radii.append(radius)
-            cv2.circle(out, (int(np.clip(px, 0, w-1)),
-                             int(np.clip(py, 0, h-1))), radius, color, -1)
-        strokes_data.append((bx, by, np.array(radii)))
+    if not use_td:
+        # LR — stroke spans full width, y wobbles
+        perp = max(1, int(h * 0.2))
+        if mode == 'heavy':
+            y_starts = [int(rng.integers(h // 5, h // 2)),
+                        int(rng.integers(h // 2, 4 * h // 5))]
+            y_ends   = [int(rng.integers(h // 2, 4 * h // 5)),
+                        int(rng.integers(h // 5, h // 2))]
+        else:
+            y_starts = [int(rng.integers(h // 5, 4 * h // 5))]
+            y_ends   = [int(rng.integers(h // 5, 4 * h // 5))]
+        for y0, y3 in zip(y_starts, y_ends):
+            radius = max(1, int(rng.uniform(lo, hi) * h))
+            bx, by = _bezier_pts_lr(y0, y3, w, h, perp, rng)
+            bx += rng.normal(0, jitter_s, bx.shape)
+            by += rng.normal(0, jitter_s, by.shape)
+            radii = []
+            for px, py in zip(bx, by):
+                radii.append(radius)
+                cv2.circle(out, (int(np.clip(px, 0, w - 1)),
+                                 int(np.clip(py, 0, h - 1))), radius, color, -1)
+            strokes_data.append((bx, by, np.array(radii)))
+    else:
+        # TD — stroke spans full height, x wobbles
+        perp = max(1, int(w * 0.2))
+        if mode == 'heavy':
+            x_starts = [int(rng.integers(w // 5, w // 2)),
+                        int(rng.integers(w // 2, 4 * w // 5))]
+            x_ends   = [int(rng.integers(w // 2, 4 * w // 5)),
+                        int(rng.integers(w // 5, w // 2))]
+        else:
+            x_starts = [int(rng.integers(w // 5, 4 * w // 5))]
+            x_ends   = [int(rng.integers(w // 5, 4 * w // 5))]
+        for x0, x3 in zip(x_starts, x_ends):
+            radius = max(1, int(rng.uniform(lo, hi) * h))
+            bx, by = _bezier_pts_td(x0, x3, w, h, perp, rng)
+            bx += rng.normal(0, jitter_s, bx.shape)
+            by += rng.normal(0, jitter_s, by.shape)
+            radii = []
+            for px, py in zip(bx, by):
+                radii.append(radius)
+                cv2.circle(out, (int(np.clip(px, 0, w - 1)),
+                                 int(np.clip(py, 0, h - 1))), radius, color, -1)
+            strokes_data.append((bx, by, np.array(radii)))
     return out, strokes_data
 
 
-def apply_stroke_to_orig(orig_rgb, bg_color, strokes_data, transform, target_h=32):
-    """Draw strokes on orig_rgb by inverting the crop→original transform."""
-    M, w_b, h_b, new_w = transform
-    M_inv = np.linalg.inv(M.astype(np.float64))
-    scale_x = w_b / new_w
-    scale_y = h_b / target_h
+def apply_stroke_to_orig(orig_rgb, bg_color, strokes_data, aabb, target_h=32):
+    """Draw strokes on orig_rgb by scaling crop coords back to original AABB coords."""
+    x1, y1, x2, y2 = aabb
+    w_b, h_b = x2 - x1 + 1, y2 - y1 + 1
+    new_w    = max(1, int(w_b * target_h / h_b))
+    scale_x  = w_b / new_w
+    scale_y  = h_b / target_h
     out = orig_rgb.copy()
     color = tuple(int(c) for c in bg_color)
     h_o, w_o = orig_rgb.shape[:2]
     for bx, by, radii in strokes_data:
-        # Undo resize scaling
-        bx_w = bx * scale_x
-        by_w = by * scale_y
-        # Inverse perspective: homogeneous coords
-        pts = np.stack([bx_w, by_w, np.ones_like(bx_w)], axis=1)  # Nx3
-        pts_o = (M_inv @ pts.T).T                                   # Nx3
-        pts_o = pts_o[:, :2] / pts_o[:, 2:3]                       # Nx2
         r_scale = scale_y
-        for (px, py), r in zip(pts_o, radii):
+        for px, py, r in zip(bx, by, radii):
+            ox = int(np.clip(px * scale_x + x1, 0, w_o - 1))
+            oy = int(np.clip(py * scale_y + y1, 0, h_o - 1))
             r_o = max(1, int(r * r_scale + 0.5))
-            cv2.circle(out, (int(np.clip(px, 0, w_o - 1)),
-                             int(np.clip(py, 0, h_o - 1))), r_o, color, -1)
+            cv2.circle(out, (ox, oy), r_o, color, -1)
     return out
 
 
-def render_stroke_sim(overlay_crops, bg_colors, transforms, orig_rgb,
+def render_stroke_sim(overlay_crops, bg_colors, aabbs, orig_rgb,
                       mode, rng, target_h=32, gap=3,
                       weak_ratio=(0.07, 0.13), heavy_ratio=(0.18, 0.28)):
     """Returns (strip_img, orig_stroked_img).
@@ -311,11 +343,11 @@ def render_stroke_sim(overlay_crops, bg_colors, transforms, orig_rgb,
         strip[:, x:x + c.shape[1]] = c
         x += c.shape[1] + gap
     orig_stroked = apply_stroke_to_orig(
-        orig_rgb, bg_colors[idx], strokes_data, transforms[idx], target_h)
+        orig_rgb, bg_colors[idx], strokes_data, aabbs[idx], target_h)
     return strip, orig_stroked
 
 
-def render_multi_sim(overlay_crops, bg_colors, transforms, orig_rgb,
+def render_multi_sim(overlay_crops, bg_colors, aabbs, orig_rgb,
                      rng, n=10, cell_h=48, cols=5, gap=2,
                      weak_ratio=(0.07, 0.13), heavy_ratio=(0.18, 0.28)):
     """n samples with 50/50 weak/heavy, laid out in a cols×rows grid."""
@@ -325,7 +357,7 @@ def render_multi_sim(overlay_crops, bg_colors, transforms, orig_rgb,
     for _ in range(n):
         mode = 'weak' if rng.random() < 0.5 else 'heavy'
         s_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
-        _, stroked = render_stroke_sim(overlay_crops, bg_colors, transforms, orig_rgb,
+        _, stroked = render_stroke_sim(overlay_crops, bg_colors, aabbs, orig_rgb,
                                        mode, s_rng, weak_ratio=weak_ratio,
                                        heavy_ratio=heavy_ratio)
         samples.append(cv2.resize(stroked, (cell_w, cell_h),
@@ -339,6 +371,31 @@ def render_multi_sim(overlay_crops, bg_colors, transforms, orig_rgb,
         y, x = r * (cell_h + gap), c * (cell_w + gap)
         grid[y:y + cell_h, x:x + cell_w] = cell
     return grid
+
+
+def draw_aabb_boxes(image_rgb, score_text, text_threshold=0.7, low_text=0.4):
+    """Draw CRAFT AABB boxes as colored rectangles on original image."""
+    h_img, w_img = image_rgb.shape[:2]
+    bin_map = (score_text > low_text).astype(np.uint8)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bin_map, connectivity=4)
+    out = image_rgb.copy()
+    colors = [(255,80,80),(80,255,80),(80,80,255),(255,255,0),(0,255,255),(255,0,255),
+              (255,160,0),(160,0,255),(0,255,160)]
+    boxes = []
+    for k in range(1, n_labels):
+        if stats[k, cv2.CC_STAT_AREA] < 10:
+            continue
+        if score_text[labels == k].max() < text_threshold:
+            continue
+        x, y = stats[k, cv2.CC_STAT_LEFT], stats[k, cv2.CC_STAT_TOP]
+        bw, bh = stats[k, cv2.CC_STAT_WIDTH], stats[k, cv2.CC_STAT_HEIGHT]
+        x1 = max(0, x - 1);        y1 = max(0, y - 1)
+        x2 = min(w_img - 1, x + bw); y2 = min(h_img - 1, y + bh)
+        boxes.append((x1, y1, x2, y2))
+    boxes.sort(key=lambda b: (b[0] + b[2]) / 2)
+    for i, (x1, y1, x2, y2) in enumerate(boxes):
+        cv2.rectangle(out, (x1, y1), (x2, y2), colors[i % len(colors)], 2)
+    return out
 
 
 def overlay_craft(image_rgb, score_text, alpha=0.5):
@@ -394,7 +451,7 @@ tr:nth-child(even) td { background: #fbfbfb; }
   __FILTER_BTNS__
 </div>
 <table>
-<thead><tr><th>#</th><th>dataset</th><th>idx</th><th>gt</th><th>original</th><th>Hi-SAM</th><th>CRAFT</th><th>char crops (Hi-SAM)</th><th>weak sim</th><th>heavy sim</th><th>mixed sim ×10</th></tr></thead>
+<thead><tr><th>#</th><th>dataset</th><th>idx</th><th>gt</th><th>original</th><th>Hi-SAM</th><th>CRAFT</th><th>AABB boxes</th><th>char crops (CRAFT AABB)</th><th>weak sim</th><th>heavy sim</th><th>mixed sim ×10</th></tr></thead>
 <tbody>
 """
 
@@ -432,11 +489,12 @@ def run_inference(n, seed, device):
           flush=True)
 
     print('[3/4] Hi-SAM TextSeg inference', flush=True)
+    import gc
     t0 = time.time()
     predictor = load_hisam(TEXTSEG_CKPT, device)
     print(f'  loaded in {time.time() - t0:.1f}s', flush=True)
     rows = []
-    for ds_name, idx in tqdm(pool, desc='TextSeg'):
+    for i, (ds_name, idx) in enumerate(tqdm(pool, desc='TextSeg')):
         _, txn, _ = lmdbs[ds_name]
         img_bytes = txn.get(f'image-{idx:09d}'.encode())
         label = txn.get(f'label-{idx:09d}'.encode())
@@ -445,10 +503,15 @@ def run_inference(n, seed, device):
             continue
         img_rgb = decode_image(img_bytes)
         mask = run_predictor(predictor, img_rgb)
+        predictor.reset_image()          # free cached image features
         rows.append({'ds': ds_name, 'idx': idx, 'gt': gt, 'orig': img_rgb,
                      'mask_ts': mask, 'craft_heat': None})
+        if (i + 1) % 500 == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
     del predictor
     torch.cuda.empty_cache()
+    gc.collect()
 
     print('[4/4] CRAFT detection', flush=True)
     t0 = time.time()
@@ -480,6 +543,7 @@ def build_html(rows, seed, out_path, weak_ratio=(0.07, 0.13), heavy_ratio=(0.18,
         hisam_overlay = overlay_mask(r['orig'], r['mask_ts'])
         ts_b64    = to_b64_png(hisam_overlay)
         craft_b64 = to_b64_png(overlay_craft(r['orig'], r['craft_heat']))
+        obb_b64   = to_b64_png(draw_aabb_boxes(r['orig'], r['craft_heat']))
         oc, bg, tf = get_char_data(hisam_overlay, r['orig'], r['mask_ts'], r['craft_heat'])
         crops_b64 = to_b64_png(render_crops_strip(oc, bg))
         rng = np.random.default_rng(i)
@@ -504,6 +568,7 @@ def build_html(rows, seed, out_path, weak_ratio=(0.07, 0.13), heavy_ratio=(0.18,
             f'<td class="img"><img src="data:image/png;base64,{orig_b64}"></td>'
             f'<td class="img"><img src="data:image/png;base64,{ts_b64}"></td>'
             f'<td class="img"><img src="data:image/png;base64,{craft_b64}"></td>'
+            f'<td class="img"><img src="data:image/png;base64,{obb_b64}"></td>'
             f'<td class="img"><img src="data:image/png;base64,{crops_b64}"></td>'
             f'<td class="img"><img src="data:image/png;base64,{weak_strip_b64}">'
             f'<div style="height:6px"></div>'
