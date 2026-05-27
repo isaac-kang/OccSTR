@@ -102,12 +102,33 @@ DATASETS: List[Tuple[str, Optional[List[str]]]] = [
 # Serialization
 # ---------------------------------------------------------------------------
 def encode_result(boxes: 'np.ndarray', colors: 'np.ndarray') -> bytes:
+    """Train mode: boxes + one BG color array."""
     n = len(boxes)
     if n == 0:
         return EMPTY_BYTES
     return (struct.pack('>I', n)
             + boxes.astype('<f4').tobytes()
             + colors.astype('u1').tobytes())
+
+
+def encode_result_cb(boxes: 'np.ndarray',
+                     colors_hisam: 'np.ndarray',
+                     colors_proxy: 'np.ndarray') -> bytes:
+    """CB mode: boxes + Hi-SAM BG + proxy BG.
+
+    Decode:
+      n            = struct.unpack('>I', data[:4])[0]
+      boxes        = np.frombuffer(data[4:4+n*32],       '<f4').reshape(n, 4, 2)
+      bg_hisam     = np.frombuffer(data[4+n*32:4+n*35],  'u1').reshape(n, 3)
+      bg_proxy     = np.frombuffer(data[4+n*35:],        'u1').reshape(n, 3)
+    """
+    n = len(boxes)
+    if n == 0:
+        return EMPTY_BYTES
+    return (struct.pack('>I', n)
+            + boxes.astype('<f4').tobytes()
+            + colors_hisam.astype('u1').tobytes()
+            + colors_proxy.astype('u1').tobytes())
 
 
 # ---------------------------------------------------------------------------
@@ -214,15 +235,17 @@ def run_craft_fullres(net, image_rgb: 'np.ndarray', device,
 
 def get_char_boxes_and_bg_hisam(image_rgb, mask, score_text,
                                  text_threshold=TEXT_THRESH,
-                                 low_text=LOW_TEXT):
-    """IDENTICAL algorithm to hisam_cb_compare.get_char_data.
+                                 low_text=LOW_TEXT,
+                                 proxy_thresh=BG_SCORE_THRESH):
+    """IDENTICAL algorithm to hisam_cb_compare.get_char_data, plus proxy BG.
 
-    AABB boxes from CRAFT score_text via connectedComponentsWithStats;
-    per-box BG color from image_rgb excluding Hi-SAM stroke pixels.
+    AABB boxes from CRAFT score_text; per-box BG via both Hi-SAM mask and
+    CRAFT score proxy, so callers can compare or choose at runtime.
 
-    Returns (boxes_32, colors):
-      boxes_32 — (N, 4, 2) float32 in CROP_H×CROP_W (32×128) space
-      colors   — (N, 3) uint8
+    Returns (boxes_32, colors_hisam, colors_proxy):
+      boxes_32      — (N, 4, 2) float32 in CROP_H×CROP_W (32×128) space
+      colors_hisam  — (N, 3) uint8  BG from Hi-SAM stroke mask
+      colors_proxy  — (N, 3) uint8  BG from CRAFT score < proxy_thresh
     """
     import cv2
     import numpy as np
@@ -247,31 +270,42 @@ def get_char_boxes_and_bg_hisam(image_rgb, mask, score_text,
         boxes.append((x1, y1, x2, y2))
 
     if not boxes:
-        return np.zeros((0, 4, 2), np.float32), np.zeros((0, 3), np.uint8)
+        return (np.zeros((0, 4, 2), np.float32),
+                np.zeros((0, 3), np.uint8),
+                np.zeros((0, 3), np.uint8))
 
     boxes.sort(key=lambda b: (b[0] + b[2]) / 2)
 
-    scale_x = CROP_W / w_img
-    scale_y = CROP_H / h_img
+    scale_x     = CROP_W / w_img
+    scale_y     = CROP_H / h_img
     fallback_bg = np.array([128, 128, 128], dtype=np.uint8)
-    boxes_32 = []
-    colors   = []
+    boxes_32       = []
+    colors_hisam   = []
+    colors_proxy   = []
     for (x1, y1, x2, y2) in boxes:
-        crop_orig = image_rgb[y1:y2 + 1, x1:x2 + 1]
-        crop_mask = mask[y1:y2 + 1, x1:x2 + 1]
-        bg_pixels = crop_orig[crop_mask < 0.5]
-        bg_color  = (bg_pixels.mean(axis=0).astype(np.uint8)
-                     if bg_pixels.size > 0 else fallback_bg)
+        crop_orig  = image_rgb[y1:y2 + 1, x1:x2 + 1]
+        # Hi-SAM BG
+        crop_mask  = mask[y1:y2 + 1, x1:x2 + 1]
+        bg_h = crop_orig[crop_mask < 0.5]
+        colors_hisam.append(bg_h.mean(axis=0).astype(np.uint8)
+                            if bg_h.size > 0 else fallback_bg)
+        # Proxy BG
+        crop_score = score_text[y1:y2 + 1, x1:x2 + 1]
+        bg_p = crop_orig[crop_score < proxy_thresh]
+        colors_proxy.append(bg_p.mean(axis=0).astype(np.uint8)
+                            if bg_p.size > 0 else fallback_bg)
+        # Box in 32×128 space
         x1_32 = float(np.clip(x1 * scale_x, 0, CROP_W - 1))
         y1_32 = float(np.clip(y1 * scale_y, 0, CROP_H - 1))
         x2_32 = float(np.clip(x2 * scale_x, 0, CROP_W - 1))
         y2_32 = float(np.clip(y2 * scale_y, 0, CROP_H - 1))
-        box_32 = np.array([[x1_32, y1_32], [x2_32, y1_32],
-                            [x2_32, y2_32], [x1_32, y2_32]], dtype=np.float32)
-        boxes_32.append(box_32)
-        colors.append(bg_color)
+        boxes_32.append(np.array([[x1_32, y1_32], [x2_32, y1_32],
+                                   [x2_32, y2_32], [x1_32, y2_32]],
+                                  dtype=np.float32))
 
-    return np.array(boxes_32, dtype=np.float32), np.array(colors, dtype=np.uint8)
+    return (np.array(boxes_32, dtype=np.float32),
+            np.array(colors_hisam, dtype=np.uint8),
+            np.array(colors_proxy, dtype=np.uint8))
 
 
 def process_lmdb_cb(net, predictor, device, in_path: Path, out_path: Path,
@@ -321,8 +355,9 @@ def process_lmdb_cb(net, predictor, device, in_path: Path, out_path: Path,
                         mask       = run_hisam(predictor, img)
                         predictor.reset_image()          # free cached image features
                         score_text = run_craft_fullres(net, img, device)
-                        boxes, colors = get_char_boxes_and_bg_hisam(img, mask, score_text)
-                        buf[idx] = encode_result(boxes, colors)
+                        boxes, colors_hisam, colors_proxy = \
+                            get_char_boxes_and_bg_hisam(img, mask, score_text)
+                        buf[idx] = encode_result_cb(boxes, colors_hisam, colors_proxy)
                     except Exception as e:
                         _log(log_path, f'[{tag}] error idx={idx}: {e}')
                         buf[idx] = EMPTY_BYTES
