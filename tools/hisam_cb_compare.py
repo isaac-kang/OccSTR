@@ -240,7 +240,7 @@ def _bezier_pts_td(x0, x3, w, h, perp, rng, n=80):
 def draw_stroke_on_crop(crop, bg_color, mode, rng,
                         weak_ratio=(0.07, 0.13), heavy_ratio=(0.18, 0.28)):
     """Draw bezier stroke(s) on crop. Returns (stroked_img, strokes_data).
-    Randomly chooses LR (left→right) or TD (top→down) direction 50/50.
+    Each stroke independently chooses LR (left→right) or TD (top→down) with p=0.5.
     strokes_data = list of (bx, by, radii) in crop coordinates.
     """
     out = crop.copy()
@@ -248,53 +248,41 @@ def draw_stroke_on_crop(crop, bg_color, mode, rng,
     color = tuple(int(c) for c in bg_color)
     lo, hi = weak_ratio
     jitter_s = 0.4
-    use_td = bool(rng.integers(0, 2))   # 50% LR, 50% TD
+
+    # heavy: 2 strokes with crossing positions; weak: 1 stroke.
+    # For LR crossing: stroke0 y top→bottom, stroke1 y bottom→top.
+    # For TD crossing: stroke0 x left→right, stroke1 x right→left.
+    if mode == 'heavy':
+        n_strokes = 2
+        lr_y = [(int(rng.integers(h // 5, h // 2)),  int(rng.integers(h // 2, 4 * h // 5))),
+                (int(rng.integers(h // 2, 4 * h // 5)), int(rng.integers(h // 5, h // 2)))]
+        td_x = [(int(rng.integers(w // 5, w // 2)),  int(rng.integers(w // 2, 4 * w // 5))),
+                (int(rng.integers(w // 2, 4 * w // 5)), int(rng.integers(w // 5, w // 2)))]
+    else:
+        n_strokes = 1
+        lr_y = [(int(rng.integers(h // 5, 4 * h // 5)), int(rng.integers(h // 5, 4 * h // 5)))]
+        td_x = [(int(rng.integers(w // 5, 4 * w // 5)), int(rng.integers(w // 5, 4 * w // 5)))]
 
     strokes_data = []
-    if not use_td:
-        # LR — stroke spans full width, y wobbles
-        perp = max(1, int(h * 0.2))
-        if mode == 'heavy':
-            y_starts = [int(rng.integers(h // 5, h // 2)),
-                        int(rng.integers(h // 2, 4 * h // 5))]
-            y_ends   = [int(rng.integers(h // 2, 4 * h // 5)),
-                        int(rng.integers(h // 5, h // 2))]
-        else:
-            y_starts = [int(rng.integers(h // 5, 4 * h // 5))]
-            y_ends   = [int(rng.integers(h // 5, 4 * h // 5))]
-        for y0, y3 in zip(y_starts, y_ends):
-            radius = max(1, int(rng.uniform(lo, hi) * h))
+    for i in range(n_strokes):
+        use_td = bool(rng.integers(0, 2))   # each stroke independently 50/50
+        radius = max(1, int(rng.uniform(lo, hi) * h))
+        if not use_td:
+            perp = max(1, int(h * 0.2))
+            y0, y3 = lr_y[i]
             bx, by = _bezier_pts_lr(y0, y3, w, h, perp, rng)
-            bx += rng.normal(0, jitter_s, bx.shape)
-            by += rng.normal(0, jitter_s, by.shape)
-            radii = []
-            for px, py in zip(bx, by):
-                radii.append(radius)
-                cv2.circle(out, (int(np.clip(px, 0, w - 1)),
-                                 int(np.clip(py, 0, h - 1))), radius, color, -1)
-            strokes_data.append((bx, by, np.array(radii)))
-    else:
-        # TD — stroke spans full height, x wobbles
-        perp = max(1, int(w * 0.2))
-        if mode == 'heavy':
-            x_starts = [int(rng.integers(w // 5, w // 2)),
-                        int(rng.integers(w // 2, 4 * w // 5))]
-            x_ends   = [int(rng.integers(w // 2, 4 * w // 5)),
-                        int(rng.integers(w // 5, w // 2))]
         else:
-            x_starts = [int(rng.integers(w // 5, 4 * w // 5))]
-            x_ends   = [int(rng.integers(w // 5, 4 * w // 5))]
-        for x0, x3 in zip(x_starts, x_ends):
-            radius = max(1, int(rng.uniform(lo, hi) * h))
+            perp = max(1, int(w * 0.2))
+            x0, x3 = td_x[i]
             bx, by = _bezier_pts_td(x0, x3, w, h, perp, rng)
-            bx += rng.normal(0, jitter_s, bx.shape)
-            by += rng.normal(0, jitter_s, by.shape)
-            radii = []
-            for px, py in zip(bx, by):
-                radii.append(radius)
-                cv2.circle(out, (int(np.clip(px, 0, w - 1)),
-                                 int(np.clip(py, 0, h - 1))), radius, color, -1)
-            strokes_data.append((bx, by, np.array(radii)))
+        bx += rng.normal(0, jitter_s, bx.shape)
+        by += rng.normal(0, jitter_s, by.shape)
+        radii = []
+        for px, py in zip(bx, by):
+            radii.append(radius)
+            cv2.circle(out, (int(np.clip(px, 0, w - 1)),
+                             int(np.clip(py, 0, h - 1))), radius, color, -1)
+        strokes_data.append((bx, by, np.array(radii)))
     return out, strokes_data
 
 
