@@ -3,12 +3,11 @@
 
 Two modes:
 
-  CB mode (--mode cb)  — identical algorithm to hisam_cb_compare.py:
-    1. Hi-SAM TextSeg: stroke segmentation mask at original resolution
-    2. CRAFT: character region score map at original resolution
-    3. AABB char boxes via connectedComponentsWithStats on score_text
-    4. Per-box BG: image_rgb[crop_mask < 0.5].mean(axis=0)  (Hi-SAM mask)
-    5. Scale boxes to 32×128 coordinates; write to output LMDB
+  CB mode (--mode cb)  — full-res CRAFT + proxy BG:
+    1. CRAFT: character region score map at original resolution
+    2. AABB char boxes via connectedComponentsWithStats on score_text
+    3. Per-box BG: image_rgb[crop_score < 0.3].mean(axis=0)  (proxy BG)
+    4. Scale boxes to 32×128 coordinates; write to output LMDB
 
   Train mode (--mode train)  — batch CRAFT on 32×128 crops (no Hi-SAM):
     1. Resize to 32×128; upscale 2× to 64×256; batched CRAFT fp16
@@ -16,6 +15,8 @@ Two modes:
     3. Per-box BG: image_32[crop_score < 0.3].mean()  (CRAFT score proxy)
 
 Output root: /data/isaackang/data/STR/Occ_aug/
+  CB (evaluation) → .../Occ_aug/evaluation/{dataset}/
+  Train           → .../Occ_aug/{dataset}/
 Key:   aug-XXXXXXXXX  (same index as image-XXXXXXXXX)
 Value: struct.pack('>I', N) + boxes_float32 (N×4×2) + bgcolors_uint8 (N×3)
 Checkpoint: __checkpoint__ → 8-byte big-endian last-written index
@@ -47,9 +48,7 @@ from typing import List, Optional, Tuple
 _HERE           = Path(__file__).resolve().parent
 OCCSTR_ROOT     = _HERE.parent
 CRAFT_ROOT      = OCCSTR_ROOT / 'third_party' / 'craft'
-HISAM_ROOT      = OCCSTR_ROOT / 'third_party' / 'Hi-SAM'
 CRAFT_CKPT      = OCCSTR_ROOT / 'weights' / 'pretrained' / 'craft' / 'craft_ic15_20k.pth'
-TEXTSEG_CKPT    = OCCSTR_ROOT / 'weights' / 'pretrained' / 'hi_sam' / 'sam_tss_h_textseg.pth'
 
 DATA_ROOT   = Path('/data/isaackang/data/STR/openocr')
 OUTPUT_ROOT = Path('/data/isaackang/data/STR/Occ_aug')
@@ -99,10 +98,55 @@ DATASETS: List[Tuple[str, Optional[List[str]]]] = [
 
 
 # ---------------------------------------------------------------------------
+# Format metadata
+# ---------------------------------------------------------------------------
+import json as _json
+
+_VALUE_LAYOUT = [
+    {"name": "n_boxes", "type": ">u4",  "bytes": 4,
+     "desc": "number of char boxes (big-endian uint32)"},
+    {"name": "boxes",   "type": "<f4",  "shape": ["n_boxes", 4, 2],
+     "desc": "AABB corners in 32x128 coordinate space (TL,TR,BR,BL)"},
+    {"name": "colors",  "type": "u1",   "shape": ["n_boxes", 3],
+     "desc": "RGB BG color per box; avg of pixels where CRAFT_score < 0.3"},
+]
+
+FORMAT_META = {
+    "version": 1,
+    "description": "OccSTR precompute: char AABB boxes + BG colors",
+    "key_pattern": "aug-{idx:09d}",
+    "special_keys": {
+        "num-samples":    "total image count (bytes → int)",
+        "__checkpoint__": "last written index (8-byte big-endian uint64)",
+        "__format__":     "this JSON descriptor",
+    },
+    "value_layout": _VALUE_LAYOUT,
+    "decode_snippet": (
+        "n=struct.unpack('>I',d[:4])[0]; "
+        "boxes=np.frombuffer(d[4:4+n*32],'<f4').reshape(n,4,2); "
+        "colors=np.frombuffer(d[4+n*32:],'u1').reshape(n,3)"
+    ),
+}
+
+FORMAT_META_CB    = {**FORMAT_META, "mode": "cb",
+                    "craft": "full-res (canvas 2560, mag 1.5)"}
+FORMAT_META_TRAIN = {**FORMAT_META, "mode": "train",
+                    "craft": "batch 64x256, fp16 AMP, batch_size=256"}
+
+FORMAT_KEY = b'__format__'
+
+
+def write_format_meta(env_out, meta: dict):
+    """Write __format__ key if not already present."""
+    with env_out.begin(write=True) as txn:
+        if txn.get(FORMAT_KEY) is None:
+            txn.put(FORMAT_KEY, _json.dumps(meta, ensure_ascii=False).encode())
+
+
+# ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
 def encode_result(boxes: 'np.ndarray', colors: 'np.ndarray') -> bytes:
-    """Train mode: boxes + one BG color array."""
     n = len(boxes)
     if n == 0:
         return EMPTY_BYTES
@@ -110,25 +154,6 @@ def encode_result(boxes: 'np.ndarray', colors: 'np.ndarray') -> bytes:
             + boxes.astype('<f4').tobytes()
             + colors.astype('u1').tobytes())
 
-
-def encode_result_cb(boxes: 'np.ndarray',
-                     colors_hisam: 'np.ndarray',
-                     colors_proxy: 'np.ndarray') -> bytes:
-    """CB mode: boxes + Hi-SAM BG + proxy BG.
-
-    Decode:
-      n            = struct.unpack('>I', data[:4])[0]
-      boxes        = np.frombuffer(data[4:4+n*32],       '<f4').reshape(n, 4, 2)
-      bg_hisam     = np.frombuffer(data[4+n*32:4+n*35],  'u1').reshape(n, 3)
-      bg_proxy     = np.frombuffer(data[4+n*35:],        'u1').reshape(n, 3)
-    """
-    n = len(boxes)
-    if n == 0:
-        return EMPTY_BYTES
-    return (struct.pack('>I', n)
-            + boxes.astype('<f4').tobytes()
-            + colors_hisam.astype('u1').tobytes()
-            + colors_proxy.astype('u1').tobytes())
 
 
 # ---------------------------------------------------------------------------
@@ -176,35 +201,8 @@ def _log(log_path: Optional[Path], msg: str):
 
 
 # ===========================================================================
-# CB MODE — identical algorithm to hisam_cb_compare.py
+# CB MODE — full-res CRAFT + proxy BG (CRAFT score < BG_SCORE_THRESH)
 # ===========================================================================
-
-def _build_hisam_args(ckpt_path):
-    return argparse.Namespace(
-        model_type='vit_h',
-        checkpoint=str(ckpt_path),
-        input_size=[1024, 1024],
-        attn_layers=1,
-        prompt_len=12,
-        hier_det=False,
-    )
-
-
-def load_hisam(ckpt_path, device):
-    from hi_sam.modeling.build import model_registry
-    from hi_sam.modeling.predictor import SamPredictor
-    ns = _build_hisam_args(ckpt_path)
-    model = model_registry['vit_h'](ns)
-    model.eval().to(device)
-    return SamPredictor(model)
-
-
-def run_hisam(predictor, image_rgb: 'np.ndarray') -> 'np.ndarray':
-    """Return binary stroke mask (uint8) at original image resolution."""
-    predictor.set_image(image_rgb)
-    _, hr_mask, _, _ = predictor.predict(multimask_output=False)
-    return hr_mask[0].astype('uint8')
-
 
 def run_craft_fullres(net, image_rgb: 'np.ndarray', device,
                       canvas_size: int = 2560, mag_ratio: float = 1.5) -> 'np.ndarray':
@@ -233,19 +231,15 @@ def run_craft_fullres(net, image_rgb: 'np.ndarray', device,
     return score_text.astype(np.float32)
 
 
-def get_char_boxes_and_bg_hisam(image_rgb, mask, score_text,
-                                 text_threshold=TEXT_THRESH,
-                                 low_text=LOW_TEXT,
-                                 proxy_thresh=BG_SCORE_THRESH):
-    """IDENTICAL algorithm to hisam_cb_compare.get_char_data, plus proxy BG.
+def get_char_boxes_and_bg(image_rgb, score_text,
+                          text_threshold=TEXT_THRESH,
+                          low_text=LOW_TEXT,
+                          proxy_thresh=BG_SCORE_THRESH):
+    """AABB char boxes from full-res CRAFT; per-box BG via CRAFT score proxy.
 
-    AABB boxes from CRAFT score_text; per-box BG via both Hi-SAM mask and
-    CRAFT score proxy, so callers can compare or choose at runtime.
-
-    Returns (boxes_32, colors_hisam, colors_proxy):
-      boxes_32      — (N, 4, 2) float32 in CROP_H×CROP_W (32×128) space
-      colors_hisam  — (N, 3) uint8  BG from Hi-SAM stroke mask
-      colors_proxy  — (N, 3) uint8  BG from CRAFT score < proxy_thresh
+    Returns (boxes_32, colors):
+      boxes_32 — (N, 4, 2) float32 in CROP_H×CROP_W (32×128) space
+      colors   — (N, 3) uint8  per-box BG: pixels where score < proxy_thresh
     """
     import cv2
     import numpy as np
@@ -270,31 +264,21 @@ def get_char_boxes_and_bg_hisam(image_rgb, mask, score_text,
         boxes.append((x1, y1, x2, y2))
 
     if not boxes:
-        return (np.zeros((0, 4, 2), np.float32),
-                np.zeros((0, 3), np.uint8),
-                np.zeros((0, 3), np.uint8))
+        return np.zeros((0, 4, 2), np.float32), np.zeros((0, 3), np.uint8)
 
     boxes.sort(key=lambda b: (b[0] + b[2]) / 2)
 
     scale_x     = CROP_W / w_img
     scale_y     = CROP_H / h_img
     fallback_bg = np.array([128, 128, 128], dtype=np.uint8)
-    boxes_32       = []
-    colors_hisam   = []
-    colors_proxy   = []
+    boxes_32 = []
+    colors   = []
     for (x1, y1, x2, y2) in boxes:
         crop_orig  = image_rgb[y1:y2 + 1, x1:x2 + 1]
-        # Hi-SAM BG
-        crop_mask  = mask[y1:y2 + 1, x1:x2 + 1]
-        bg_h = crop_orig[crop_mask < 0.5]
-        colors_hisam.append(bg_h.mean(axis=0).astype(np.uint8)
-                            if bg_h.size > 0 else fallback_bg)
-        # Proxy BG
         crop_score = score_text[y1:y2 + 1, x1:x2 + 1]
-        bg_p = crop_orig[crop_score < proxy_thresh]
-        colors_proxy.append(bg_p.mean(axis=0).astype(np.uint8)
-                            if bg_p.size > 0 else fallback_bg)
-        # Box in 32×128 space
+        bg_pix = crop_orig[crop_score < proxy_thresh]
+        colors.append(bg_pix.mean(axis=0).astype(np.uint8)
+                      if bg_pix.size > 0 else fallback_bg)
         x1_32 = float(np.clip(x1 * scale_x, 0, CROP_W - 1))
         y1_32 = float(np.clip(y1 * scale_y, 0, CROP_H - 1))
         x2_32 = float(np.clip(x2 * scale_x, 0, CROP_W - 1))
@@ -303,12 +287,10 @@ def get_char_boxes_and_bg_hisam(image_rgb, mask, score_text,
                                    [x2_32, y2_32], [x1_32, y2_32]],
                                   dtype=np.float32))
 
-    return (np.array(boxes_32, dtype=np.float32),
-            np.array(colors_hisam, dtype=np.uint8),
-            np.array(colors_proxy, dtype=np.uint8))
+    return np.array(boxes_32, dtype=np.float32), np.array(colors, dtype=np.uint8)
 
 
-def process_lmdb_cb(net, predictor, device, in_path: Path, out_path: Path,
+def process_lmdb_cb(net, device, in_path: Path, out_path: Path,
                     log_path: Optional[Path]):
     import gc
     import lmdb
@@ -321,6 +303,7 @@ def process_lmdb_cb(net, predictor, device, in_path: Path, out_path: Path,
 
     out_path.mkdir(parents=True, exist_ok=True)
     env_out = lmdb.open(str(out_path), map_size=MAP_SIZE, sync=False, writemap=True)
+    write_format_meta(env_out, FORMAT_META_CB)
     with env_out.begin() as txn:
         cp_raw = txn.get(CHECKPOINT_KEY)
     start_idx = int.from_bytes(cp_raw, 'big') + 1 if cp_raw else 1
@@ -331,7 +314,7 @@ def process_lmdb_cb(net, predictor, device, in_path: Path, out_path: Path,
         env_in.close(); env_out.close()
         return
 
-    _log(log_path, f'[{tag}] {n_total - start_idx + 1:,}/{n_total:,} images (Hi-SAM+CRAFT, resume {start_idx})')
+    _log(log_path, f'[{tag}] {n_total - start_idx + 1:,}/{n_total:,} images (CRAFT BG, resume {start_idx})')
     t0 = time.time()
     n_errors = 0
     COMMIT_EVERY  = 50
@@ -350,24 +333,17 @@ def process_lmdb_cb(net, predictor, device, in_path: Path, out_path: Path,
                     buf[idx] = EMPTY_BYTES
                     n_errors += 1
                 else:
-                    mask = score_text = None
+                    score_text = None
                     try:
-                        mask       = run_hisam(predictor, img)
-                        predictor.reset_image()          # free cached image features
                         score_text = run_craft_fullres(net, img, device)
-                        boxes, colors_hisam, colors_proxy = \
-                            get_char_boxes_and_bg_hisam(img, mask, score_text)
-                        buf[idx] = encode_result_cb(boxes, colors_hisam, colors_proxy)
+                        boxes, colors = get_char_boxes_and_bg(img, score_text)
+                        buf[idx] = encode_result(boxes, colors)
                     except Exception as e:
                         _log(log_path, f'[{tag}] error idx={idx}: {e}')
                         buf[idx] = EMPTY_BYTES
                         n_errors += 1
-                        try:
-                            predictor.reset_image()
-                        except Exception:
-                            pass
                     finally:
-                        del mask, score_text             # free large arrays immediately
+                        del score_text
 
             if len(buf) >= COMMIT_EVERY or idx == n_total:
                 with env_out.begin(write=True) as txn_out:
@@ -400,11 +376,9 @@ def process_lmdb_cb(net, predictor, device, in_path: Path, out_path: Path,
 
 def worker_cb(gpu_id: int, tasks: list,
               craft_root_str: str, craft_ckpt_str: str,
-              hisam_root_str: str, textseg_ckpt_str: str,
               log_dir_str: str):
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
     sys.path.insert(0, craft_root_str)
-    sys.path.insert(0, hisam_root_str)
 
     import torch
     from collections import OrderedDict
@@ -422,15 +396,13 @@ def worker_cb(gpu_id: int, tasks: list,
     net.load_state_dict(sd)
     net.eval().to(device)
 
-    predictor = load_hisam(textseg_ckpt_str, device)
-
     _log(log_path, f'[GPU {gpu_id}] CB mode ready, {len(tasks)} task(s): '
                    f'{[t[0].name for t in tasks]}')
 
     for in_path, out_path in tasks:
-        process_lmdb_cb(net, predictor, device, in_path, out_path, log_path)
+        process_lmdb_cb(net, device, in_path, out_path, log_path)
 
-    del net, predictor
+    del net
     torch.cuda.empty_cache()
     _log(log_path, f'[GPU {gpu_id}] all CB tasks done')
 
@@ -439,7 +411,7 @@ def collect_cb_tasks() -> List[Tuple[Path, Path, int]]:
     tasks = []
     for name in CB_NAMES:
         in_path  = CB_ROOT / name
-        out_path = OUTPUT_ROOT / name
+        out_path = OUTPUT_ROOT / in_path.relative_to(DATA_ROOT)
         try:
             n = get_num_samples(in_path)
             if n:
@@ -593,6 +565,7 @@ def process_lmdb(net, device, use_amp,
 
     out_path.mkdir(parents=True, exist_ok=True)
     env_out = lmdb.open(str(out_path), map_size=MAP_SIZE, sync=False, writemap=True)
+    write_format_meta(env_out, FORMAT_META_TRAIN)
 
     with env_out.begin() as txn:
         cp_raw = txn.get(CHECKPOINT_KEY)
@@ -732,13 +705,15 @@ def collect_train_tasks(no_rdcu: bool) -> List[Tuple[Path, Path, int]]:
         if subdirs is None:
             n = get_num_samples(ds_root)
             if n:
-                tasks.append((ds_root, OUTPUT_ROOT / ds_name, n))
+                tasks.append((ds_root,
+                              OUTPUT_ROOT / ds_root.relative_to(DATA_ROOT), n))
         else:
             for sub in subdirs:
-                n = get_num_samples(ds_root / sub)
+                in_path = ds_root / sub
+                n = get_num_samples(in_path)
                 if n:
-                    tasks.append((ds_root / sub,
-                                  OUTPUT_ROOT / ds_name / sub, n))
+                    tasks.append((in_path,
+                                  OUTPUT_ROOT / in_path.relative_to(DATA_ROOT), n))
     return tasks
 
 
@@ -804,7 +779,6 @@ def main():
                 target=worker_cb,
                 args=(actual_gpu, task_pairs,
                       str(CRAFT_ROOT), str(CRAFT_CKPT),
-                      str(HISAM_ROOT), str(TEXTSEG_CKPT),
                       str(log_dir)),
             )
             p.start()
