@@ -16,8 +16,6 @@ DATA_ROOT = Path('/data/isaackang/data/STR/openocr/test')
 AUG_ROOT  = Path('/data/isaackang/data/STR/Occ_aug/test')
 CB_NAMES  = ['IIIT5k', 'SVT', 'IC13_857', 'IC15_1811', 'SVTP', 'CUTE80']
 
-CROP_H, CROP_W = 32, 128
-
 
 def open_lmdb(path):
     return lmdb.open(str(path), readonly=True, lock=False, max_readers=1,
@@ -48,14 +46,14 @@ def img_to_b64(arr, max_h=128):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def draw_boxes(img_rgb, boxes_32):
-    """Draw AABB boxes scaled from 32×128 back to original image size."""
+def draw_boxes(img_rgb, boxes_norm):
+    """Draw AABB boxes scaled from normalized [0,1] back to original image size."""
     out = img_rgb.copy()
     h, w = img_rgb.shape[:2]
-    sx, sy = w / CROP_W, h / CROP_H
+    sx, sy = w, h     # boxes are normalized [0,1]
     colors = [(255,80,80),(80,255,80),(80,80,255),(255,255,0),
               (0,255,255),(255,0,255),(255,160,0),(160,0,255)]
-    for i, box in enumerate(boxes_32):
+    for i, box in enumerate(boxes_norm):
         x1 = int(box[:, 0].min() * sx); y1 = int(box[:, 1].min() * sy)
         x2 = int(box[:, 0].max() * sx); y2 = int(box[:, 1].max() * sy)
         cv2.rectangle(out, (x1, y1), (x2, y2), colors[i % len(colors)], 1)

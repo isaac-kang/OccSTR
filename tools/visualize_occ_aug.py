@@ -4,7 +4,6 @@ from PIL import Image
 
 DATA_ROOT   = Path('/data/isaackang/data/STR/openocr')
 OCC_ROOT    = Path('/data/isaackang/data/STR/Occ_aug')
-CROP_H, CROP_W = 32, 128
 
 DATASETS = [
     ('Union14M-L-LMDB-Filtered', ['filter_train_challenging','filter_train_easy','filter_train_hard','filter_train_medium','filter_train_normal']),
@@ -80,7 +79,7 @@ for ds_name, subdirs in DATASETS:
             continue
 
         rows_html.append(f'<tr><td colspan="3" class="section">{label} ({n_total:,} samples)</td></tr>')
-        rows_html.append('<tr><th>idx</th><th>원본 이미지 (native res)</th><th>character crops (32×128 기준) → bg colors</th></tr>')
+        rows_html.append('<tr><th>idx</th><th>원본 이미지 (native res)</th><th>character crops (native res) → bg colors</th></tr>')
 
         for idx, img, boxes, colors in samples:
             orig_h, orig_w = img.shape[:2]
@@ -88,18 +87,16 @@ for ds_name, subdirs in DATASETS:
             # 1열: 원본 이미지 그대로 (최대 height 128px로만 표시 스케일)
             orig_b64 = img_to_b64(img, max_h=128)
 
-            # character crop용: 32×128 resize
-            crop32 = cv2.resize(img, (CROP_W, CROP_H), interpolation=cv2.INTER_LINEAR)
-
             crops_html = '<div class="crops">'
             for box, color in zip(boxes, colors):
-                x1 = int(np.clip(box[:,0].min(), 0, CROP_W-1))
-                y1 = int(np.clip(box[:,1].min(), 0, CROP_H-1))
-                x2 = int(np.clip(box[:,0].max(), 0, CROP_W-1))
-                y2 = int(np.clip(box[:,1].max(), 0, CROP_H-1))
+                # boxes are normalized [0,1] → native pixel coords
+                x1 = int(np.clip(box[:,0].min()*orig_w, 0, orig_w-1))
+                y1 = int(np.clip(box[:,1].min()*orig_h, 0, orig_h-1))
+                x2 = int(np.clip(box[:,0].max()*orig_w, 0, orig_w-1))
+                y2 = int(np.clip(box[:,1].max()*orig_h, 0, orig_h-1))
                 if x2 <= x1 or y2 <= y1:
                     continue
-                char_patch = crop32[y1:y2+1, x1:x2+1]
+                char_patch = img[y1:y2+1, x1:x2+1]
                 h_p, w_p   = char_patch.shape[:2]
                 char_b64   = img_to_b64(char_patch, max_h=48)
                 rgb_str    = f'rgb({color[0]},{color[1]},{color[2]})'
@@ -138,7 +135,7 @@ th {{ background:#333; font-size:12px; }}
 </style>
 </head><body>
 <h2>OccSTR Aug Visualization — 4 samples × 12 LMDBs</h2>
-<p style="color:#aaa;font-size:12px">1열: 원본 이미지 (native 해상도) | 3열: 32×128 기준 character crops (위) → 동일 크기 bg 패치 (아래)</p>
+<p style="color:#aaa;font-size:12px">1열: 원본 이미지 (native 해상도) | 3열: native 해상도 character crops (위) → bg 패치 (아래)</p>
 <table>
 {''.join(rows_html)}
 </table>
