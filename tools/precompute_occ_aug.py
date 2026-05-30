@@ -506,7 +506,12 @@ def merge_shards(final_path: Path, shards: list, n_total: int,
     import shutil
     tag = f'{final_path.parent.name}/{final_path.name}'
     final_path.mkdir(parents=True, exist_ok=True)
-    env = lmdb.open(str(final_path), map_size=MAP_SIZE, sync=False, writemap=True)
+    # NOTE: no writemap. writemap=True mmaps the full map_size (8G), so the file
+    # is ftruncate'd to 8G with the unused tail left as sparse holes (apparent
+    # 8G, actual ~content) and is SIGBUS-prone on this filesystem. Default
+    # (writemap=False) grows the file to actual content -> dense output, so no
+    # post-hoc compaction is needed. (Shards already use writemap=False.)
+    env = lmdb.open(str(final_path), map_size=MAP_SIZE, sync=False)
     write_format_meta(env, FORMAT_META)
     copied = 0
     for shard_out, _lo, _hi in shards:
